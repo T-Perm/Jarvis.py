@@ -1,0 +1,5 @@
+.env
+*.dll
+*.task
+__pycache__/
+venv/
