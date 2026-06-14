@@ -1,40 +1,40 @@
+import asyncio
 import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import webbrowser
+from typing import Any
 
-import asyncio
-import tempfile
 import numpy as np
 import sounddevice as sd
-from faster_whisper import WhisperModel
-from openai import OpenAI
-import pyautogui
 import edge_tts
 import pygame
+import pyautogui
+from faster_whisper import WhisperModel
+from openai import OpenAI
 
-# ---------------------------------------------------------------------------
-# Voice — Microsoft Edge TTS (en-GB-RyanNeural — British, authoritative)
-# ---------------------------------------------------------------------------
-JARVIS_VOICE = "en-GB-RyanNeural"
-_voice_lock = threading.Lock()
+JARVIS_VOICE: str = "en-GB-RyanNeural"
+_voice_lock: threading.Lock = threading.Lock()
 
 pygame.mixer.init()
 
 
 def speak(text: str) -> None:
-    def _worker():
+    def _worker() -> None:
         with _voice_lock:
-            async def _synth():
+            async def _synth() -> str:
+                fd: int
+                path: str
                 fd, path = tempfile.mkstemp(suffix=".mp3")
                 os.close(fd)
                 await edge_tts.Communicate(text, JARVIS_VOICE).save(path)
                 return path
 
-            path = asyncio.run(_synth())
+            path: str = asyncio.run(_synth())
             try:
                 pygame.mixer.music.load(path)
                 pygame.mixer.music.play()
@@ -45,25 +45,23 @@ def speak(text: str) -> None:
 
     threading.Thread(target=_worker, daemon=True).start()
 
-_nim = OpenAI(
+
+_nim: OpenAI = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.environ["NVIDIA_API_KEY"],
 )
-NIM_MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.1-8b-instruct")
+NIM_MODEL: str = os.environ.get("NIM_MODEL", "meta/llama-3.1-8b-instruct")
 
-_whisper = WhisperModel("base.en", device="cpu", compute_type="int8")
-SAMPLE_RATE = 16000
+_whisper: WhisperModel = WhisperModel("base.en", device="cpu", compute_type="int8")
+SAMPLE_RATE: int = 16000
 
-SYSTEM = (
+SYSTEM: str = (
     "You are J.A.R.V.I.S., a desktop AI assistant with full control over the user's PC. "
     "Use tools to execute any request. Chain multiple tool calls as needed. "
     "run_command can do almost anything — use it freely. Be concise."
 )
 
-# ---------------------------------------------------------------------------
-# App aliases — friendly name → executable or URL
-# ---------------------------------------------------------------------------
-_APP_MAP = {
+_APP_MAP: dict[str, str] = {
     "chrome": "chrome", "google chrome": "chrome",
     "firefox": "firefox",
     "edge": "msedge", "microsoft edge": "msedge",
@@ -94,10 +92,7 @@ _APP_MAP = {
     "chatgpt": "https://chat.openai.com",
 }
 
-# ---------------------------------------------------------------------------
-# Tool definitions
-# ---------------------------------------------------------------------------
-TOOLS = [
+TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
@@ -299,16 +294,20 @@ TOOLS = [
 
 
 class JarvisAgent:
-    def __init__(self):
+    _frames: list[np.ndarray]
+    _stream: sd.InputStream | None
+    status: str
+
+    def __init__(self) -> None:
         self._frames = []
         self._stream = None
         self.status = "idle"
 
     @property
-    def listening(self):
+    def listening(self) -> bool:
         return self._stream is not None
 
-    def start_listening(self):
+    def start_listening(self) -> None:
         self._frames = []
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -319,30 +318,30 @@ class JarvisAgent:
         self._stream.start()
         self.status = "listening"
 
-    def stop_and_process(self):
+    def stop_and_process(self) -> None:
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
         threading.Thread(target=self._process, daemon=True).start()
 
-    def _cb(self, indata, frames, time_, status):
+    def _cb(self, indata: np.ndarray, frames: int, time_: Any, status: sd.CallbackFlags) -> None:
         self._frames.append(indata.copy())
 
-    def _process(self):
+    def _process(self) -> None:
         self.status = "thinking"
         if not self._frames:
             self.status = "idle"
             return
-        audio = np.concatenate(self._frames, axis=0).flatten()
+        audio: np.ndarray = np.concatenate(self._frames, axis=0).flatten()
         segments, _ = _whisper.transcribe(audio, beam_size=1)
-        text = " ".join(s.text for s in segments).strip()
+        text: str = " ".join(s.text for s in segments).strip()
         if text:
             print(f"[STT] {text}")
             self._run_llm(text)
         self.status = "idle"
 
-    def _dispatch(self, name, args):
+    def _dispatch(self, name: str, args: dict[str, Any]) -> str:
         match name:
             case "run_command":
                 try:
@@ -350,7 +349,7 @@ class JarvisAgent:
                         ["powershell", "-NoProfile", "-Command", args["command"]],
                         capture_output=True, text=True, timeout=30,
                     )
-                    output = (result.stdout + result.stderr).strip()
+                    output: str = (result.stdout + result.stderr).strip()
                     print(f"[CMD] {args['command'][:80]}\n{output[:300]}")
                     return output[:2000] or "done"
                 except subprocess.TimeoutExpired:
@@ -359,11 +358,11 @@ class JarvisAgent:
                     return f"error: {e}"
 
             case "open_app":
-                target = _APP_MAP.get(args["name"].lower().strip(), args["name"])
+                target: str = _APP_MAP.get(args["name"].lower().strip(), args["name"])
                 if target.startswith("http"):
                     webbrowser.open(target)
                 else:
-                    exe = shutil.which(target) or target
+                    exe: str = shutil.which(target) or target
                     try:
                         subprocess.Popen([exe])
                     except FileNotFoundError:
@@ -376,7 +375,7 @@ class JarvisAgent:
                 pyautogui.hotkey(*args["keys"])
 
             case "click_screen":
-                btn = args.get("button", "left")
+                btn: str = args.get("button", "left")
                 if args.get("double"):
                     pyautogui.doubleClick(args["x"], args["y"], button=btn)
                 else:
@@ -393,11 +392,11 @@ class JarvisAgent:
                 )
 
             case "scroll":
-                clicks = args.get("amount", 3)
+                clicks: int = args.get("amount", 3)
                 pyautogui.scroll(clicks if args["direction"] == "up" else -clicks)
 
             case "screenshot":
-                path = args.get("path") or os.path.join(
+                path: str = args.get("path") or os.path.join(
                     os.path.expanduser("~"), "Desktop",
                     f"jarvis_{int(time.time())}.png",
                 )
@@ -408,7 +407,7 @@ class JarvisAgent:
             case "read_file":
                 try:
                     with open(args["path"], "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read(8000)
+                        content: str = f.read(8000)
                     return content
                 except Exception as e:
                     return f"error: {e}"
@@ -423,20 +422,24 @@ class JarvisAgent:
                     return f"error: {e}"
 
             case "set_clipboard":
-                pyautogui.hotkey()  # ensure pyautogui is ready
                 import tkinter as tk
-                r = tk.Tk(); r.withdraw()
-                r.clipboard_clear(); r.clipboard_append(args["text"]); r.update()
-                r.after(500, r.destroy); r.mainloop()
+                r: tk.Tk = tk.Tk()
+                r.withdraw()
+                r.clipboard_clear()
+                r.clipboard_append(args["text"])
+                r.update()
+                r.after(500, r.destroy)
+                r.mainloop()
 
             case "get_clipboard":
                 import tkinter as tk
-                r = tk.Tk(); r.withdraw()
+                r = tk.Tk()
+                r.withdraw()
                 try:
-                    text = r.clipboard_get()
+                    clipboard_text: str = r.clipboard_get()
                 finally:
                     r.destroy()
-                return text
+                return clipboard_text
 
             case "search_web":
                 webbrowser.open(f"https://google.com/search?q={args['query']}")
@@ -447,8 +450,8 @@ class JarvisAgent:
 
         return "done"
 
-    def _run_llm(self, text):
-        messages = [
+    def _run_llm(self, text: str) -> None:
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": text},
         ]
@@ -468,7 +471,7 @@ class JarvisAgent:
             self.status = "acting"
             messages.append(msg)
             for tc in msg.tool_calls:
-                result = self._dispatch(
+                result: str = self._dispatch(
                     tc.function.name,
                     json.loads(tc.function.arguments),
                 )
