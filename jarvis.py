@@ -330,16 +330,19 @@ class JarvisAgent:
 
     def _process(self) -> None:
         self.status = "thinking"
-        if not self._frames:
+        try:
+            if not self._frames:
+                return
+            audio: np.ndarray = np.concatenate(self._frames, axis=0).flatten()
+            segments, _ = _whisper.transcribe(audio, beam_size=1)
+            text: str = " ".join(s.text for s in segments).strip()
+            if text:
+                print(f"[STT] {text}")
+                self._run_llm(text)
+        except Exception as e:
+            print(f"[JARVIS] error during processing: {e}")
+        finally:
             self.status = "idle"
-            return
-        audio: np.ndarray = np.concatenate(self._frames, axis=0).flatten()
-        segments, _ = _whisper.transcribe(audio, beam_size=1)
-        text: str = " ".join(s.text for s in segments).strip()
-        if text:
-            print(f"[STT] {text}")
-            self._run_llm(text)
-        self.status = "idle"
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> str:
         match name:
@@ -359,50 +362,74 @@ class JarvisAgent:
 
             case "open_app":
                 target: str = _APP_MAP.get(args["name"].lower().strip(), args["name"])
-                if target.startswith("http"):
-                    webbrowser.open(target)
-                else:
-                    exe: str = shutil.which(target) or target
-                    try:
-                        subprocess.Popen([exe])
-                    except FileNotFoundError:
-                        subprocess.Popen(exe, shell=True)
+                try:
+                    if target.startswith("http"):
+                        webbrowser.open(target)
+                    else:
+                        exe: str = shutil.which(target) or target
+                        try:
+                            subprocess.Popen([exe])
+                        except FileNotFoundError:
+                            subprocess.Popen(exe, shell=True)
+                except Exception as e:
+                    return f"error: {e}"
 
             case "type_text":
-                pyautogui.typewrite(args["text"], interval=0.03)
+                try:
+                    pyautogui.typewrite(args["text"], interval=0.03)
+                except Exception as e:
+                    return f"error: {e}"
 
             case "press_keys":
-                pyautogui.hotkey(*args["keys"])
+                try:
+                    pyautogui.hotkey(*args["keys"])
+                except Exception as e:
+                    return f"error: {e}"
 
             case "click_screen":
-                btn: str = args.get("button", "left")
-                if args.get("double"):
-                    pyautogui.doubleClick(args["x"], args["y"], button=btn)
-                else:
-                    pyautogui.click(args["x"], args["y"], button=btn)
+                try:
+                    btn: str = args.get("button", "left")
+                    if args.get("double"):
+                        pyautogui.doubleClick(args["x"], args["y"], button=btn)
+                    else:
+                        pyautogui.click(args["x"], args["y"], button=btn)
+                except Exception as e:
+                    return f"error: {e}"
 
             case "move_mouse":
-                pyautogui.moveTo(args["x"], args["y"])
+                try:
+                    pyautogui.moveTo(args["x"], args["y"])
+                except Exception as e:
+                    return f"error: {e}"
 
             case "drag":
-                pyautogui.drag(
-                    args["x2"] - args["x1"], args["y2"] - args["y1"],
-                    duration=args.get("duration", 0.5),
-                    button="left",
-                )
+                try:
+                    pyautogui.drag(
+                        args["x2"] - args["x1"], args["y2"] - args["y1"],
+                        duration=args.get("duration", 0.5),
+                        button="left",
+                    )
+                except Exception as e:
+                    return f"error: {e}"
 
             case "scroll":
-                clicks: int = args.get("amount", 3)
-                pyautogui.scroll(clicks if args["direction"] == "up" else -clicks)
+                try:
+                    clicks: int = args.get("amount", 3)
+                    pyautogui.scroll(clicks if args["direction"] == "up" else -clicks)
+                except Exception as e:
+                    return f"error: {e}"
 
             case "screenshot":
-                path: str = args.get("path") or os.path.join(
-                    os.path.expanduser("~"), "Desktop",
-                    f"jarvis_{int(time.time())}.png",
-                )
-                pyautogui.screenshot(path)
-                print(f"[screenshot] {path}")
-                return path
+                try:
+                    path: str = args.get("path") or os.path.join(
+                        os.path.expanduser("~"), "Desktop",
+                        f"jarvis_{int(time.time())}.png",
+                    )
+                    pyautogui.screenshot(path)
+                    print(f"[screenshot] {path}")
+                    return path
+                except Exception as e:
+                    return f"error: {e}"
 
             case "read_file":
                 try:
@@ -422,31 +449,47 @@ class JarvisAgent:
                     return f"error: {e}"
 
             case "set_clipboard":
-                import tkinter as tk
-                r: tk.Tk = tk.Tk()
-                r.withdraw()
-                r.clipboard_clear()
-                r.clipboard_append(args["text"])
-                r.update()
-                r.after(500, r.destroy)
-                r.mainloop()
+                try:
+                    import tkinter as tk
+                    r: tk.Tk = tk.Tk()
+                    r.withdraw()
+                    r.clipboard_clear()
+                    r.clipboard_append(args["text"])
+                    r.update()
+                    r.after(500, r.destroy)
+                    r.mainloop()
+                except Exception as e:
+                    return f"error: {e}"
 
             case "get_clipboard":
-                import tkinter as tk
-                r = tk.Tk()
-                r.withdraw()
                 try:
-                    clipboard_text: str = r.clipboard_get()
-                finally:
-                    r.destroy()
-                return clipboard_text
+                    import tkinter as tk
+                    r = tk.Tk()
+                    r.withdraw()
+                    try:
+                        clipboard_text: str = r.clipboard_get()
+                    finally:
+                        r.destroy()
+                    return clipboard_text
+                except Exception as e:
+                    return f"error: {e}"
 
             case "search_web":
-                webbrowser.open(f"https://google.com/search?q={args['query']}")
+                try:
+                    webbrowser.open(f"https://google.com/search?q={args['query']}")
+                except Exception as e:
+                    return f"error: {e}"
 
             case "say":
-                print(f"[JARVIS] {args['text']}")
-                speak(args["text"])
+                try:
+                    print(f"[JARVIS] {args['text']}")
+                    speak(args["text"])
+                except Exception as e:
+                    return f"error: {e}"
+
+            case _:
+                print(f"[JARVIS] unknown tool requested: {name}")
+                return f"error: unknown tool '{name}'"
 
         return "done"
 
@@ -455,26 +498,35 @@ class JarvisAgent:
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": text},
         ]
-        while True:
-            resp = _nim.chat.completions.create(
-                model=NIM_MODEL,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
+        max_iterations: int = 10
+        for _ in range(max_iterations):
+            try:
+                resp = _nim.chat.completions.create(
+                    model=NIM_MODEL,
+                    messages=messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                )
+            except Exception as e:
+                print(f"[JARVIS] LLM request failed: {e}")
+                speak("Sorry, I couldn't reach my language model.")
+                return
             msg = resp.choices[0].message
             if not msg.tool_calls:
                 if msg.content:
                     print(f"[JARVIS] {msg.content}")
                     speak(msg.content)
-                break
+                return
             self.status = "acting"
             messages.append(msg)
             for tc in msg.tool_calls:
-                result: str = self._dispatch(
-                    tc.function.name,
-                    json.loads(tc.function.arguments),
-                )
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError as e:
+                    print(f"[JARVIS] bad tool arguments for {tc.function.name}: {e}")
+                    result: str = f"error: invalid arguments"
+                else:
+                    result = self._dispatch(tc.function.name, args)
                 messages.append(
                     {
                         "role": "tool",
@@ -482,3 +534,4 @@ class JarvisAgent:
                         "content": result or "done",
                     }
                 )
+        print("[JARVIS] reached max tool iterations, stopping")
