@@ -222,7 +222,11 @@ def draw_hud(
         pulse_r: int = int(10 + 5 * math.sin(time.time() * 6))
         cv2.circle(frame, (w // 2, h // 2), pulse_r, CYAN, -1)
         cv2.putText(frame, "LISTENING...", (w // 2 - 55, h // 2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CYAN, 1, cv2.LINE_AA)
-    elif status in ("thinking", "acting"):
+    elif status == "speaking":
+        pulse_r = int(10 + 5 * math.sin(time.time() * 6))
+        cv2.circle(frame, (w // 2, h // 2), pulse_r, CYAN, -1)
+        cv2.putText(frame, "SPEAKING...", (w // 2 - 50, h // 2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CYAN, 1, cv2.LINE_AA)
+    elif status in ("thinking", "acting", "transcribing", "calling jarvis") or status.startswith("running:"):
         amber_overlay: np.ndarray = frame.copy()
         cv2.rectangle(amber_overlay, (0, 0), (w, h), (0, 100, 200), -1)
         cv2.addWeighted(amber_overlay, 0.15, frame, 0.85, 0, frame)

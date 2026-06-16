@@ -23,8 +23,10 @@ _voice_lock: threading.Lock = threading.Lock()
 pygame.mixer.init()
 
 
-def speak(text: str) -> None:
+def speak(text: str, on_speaking=None, on_idle=None) -> None:
     def _worker() -> None:
+        if on_speaking:
+            on_speaking()
         with _voice_lock:
             async def _synth() -> str:
                 fd: int
@@ -43,6 +45,8 @@ def speak(text: str) -> None:
             finally:
                 pygame.mixer.music.unload()
                 os.unlink(path)
+        if on_idle:
+            on_idle()
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -360,6 +364,14 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "reset_conversation",
+            "description": "Clear conversation memory. Call this when the user asks you to start fresh, forget everything, or reset the conversation.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -372,6 +384,13 @@ class JarvisAgent:
         self._frames = []
         self._stream = None
         self.status = "idle"
+        self._history: list[dict] = []
+        self._last_command_time: float = 0.0
+
+    def _speak(self, text: str) -> None:
+        speak(text,
+              on_speaking=lambda: setattr(self, 'status', 'speaking'),
+              on_idle=lambda: setattr(self, 'status', 'idle'))
 
     @property
     def listening(self) -> bool:
@@ -399,22 +418,25 @@ class JarvisAgent:
         self._frames.append(indata.copy())
 
     def _process(self) -> None:
-        self.status = "thinking"
+        self.status = "transcribing"
         try:
             if not self._frames:
+                self.status = "idle"
                 return
             audio: np.ndarray = np.concatenate(self._frames, axis=0).flatten()
             segments, _ = _whisper.transcribe(audio, beam_size=1)
             text: str = " ".join(s.text for s in segments).strip()
-            if text:
-                print(f"[STT] {text}")
-                self._run_llm(text)
+            if not text:
+                self.status = "idle"
+                return
+            print(f"[STT] {text}")
+            self._run_llm(text)
         except Exception as e:
             print(f"[JARVIS] error during processing: {e}")
-        finally:
             self.status = "idle"
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> str:
+        self.status = f"running: {name}"
         match name:
             case "run_command":
                 cmd: str = args["command"].strip()
@@ -567,7 +589,7 @@ class JarvisAgent:
             case "say":
                 try:
                     print(f"[JARVIS] {args['text']}")
-                    speak(args["text"])
+                    self._speak(args["text"])
                 except Exception as e:
                     return f"error: {e}"
 
@@ -611,8 +633,13 @@ class JarvisAgent:
             case "cannot_do":
                 reason: str = args.get("reason", "I don't know how to do that.")
                 print(f"[JARVIS] cannot_do: {reason}")
-                speak(reason)
+                self._speak(reason)
                 return "__cannot_do__"
+
+            case "reset_conversation":
+                self._history.clear()
+                self._speak("Memory cleared.")
+                return "done"
 
             case _:
                 print(f"[JARVIS] unknown tool requested: {name}")
@@ -642,47 +669,63 @@ class JarvisAgent:
         )
 
     def _run_llm(self, text: str) -> None:
+        now = time.time()
+        if self._last_command_time and (now - self._last_command_time) > 300:
+            self._history.clear()
+        self._last_command_time = now
+
+        history_len = len(self._history)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._build_system()},
+            *self._history,
             {"role": "user", "content": text},
         ]
         max_iterations: int = 10
-        for _ in range(max_iterations):
-            try:
-                resp = _nim.chat.completions.create(
-                    model=NIM_MODEL,
-                    messages=messages,
-                    tools=TOOLS,
-                    tool_choice="auto",
-                    parallel_tool_calls=False,
-                )
-            except Exception as e:
-                print(f"[JARVIS] LLM request failed: {e}")
-                speak("Sorry, I couldn't reach my language model.")
-                return
-            msg = resp.choices[0].message
-            if not msg.tool_calls:
-                if msg.content:
-                    print(f"[JARVIS] {msg.content}")
-                    speak(msg.content)
-                return
-            self.status = "acting"
-            messages.append(msg)
-            for tc in msg.tool_calls[:1]:
+        try:
+            for _ in range(max_iterations):
+                self.status = "calling jarvis"
                 try:
-                    args = json.loads(tc.function.arguments)
-                except json.JSONDecodeError as e:
-                    print(f"[JARVIS] bad tool arguments for {tc.function.name}: {e}")
-                    result: str = "error: invalid arguments"
-                else:
-                    result = self._dispatch(tc.function.name, args)
-                if result == "__cannot_do__":
+                    resp = _nim.chat.completions.create(
+                        model=NIM_MODEL,
+                        messages=messages,
+                        tools=TOOLS,
+                        tool_choice="auto",
+                        parallel_tool_calls=False,
+                    )
+                except Exception as e:
+                    print(f"[JARVIS] LLM request failed: {e}")
+                    self._speak("Sorry, I couldn't reach my language model.")
                     return
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result or "done",
-                    }
-                )
-        print("[JARVIS] reached max tool iterations, stopping")
+                msg = resp.choices[0].message
+                messages.append(msg)
+                if not msg.tool_calls:
+                    if msg.content:
+                        print(f"[JARVIS] {msg.content}")
+                        self._speak(msg.content)
+                    else:
+                        self.status = "idle"
+                    return
+                for tc in msg.tool_calls[:1]:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError as e:
+                        print(f"[JARVIS] bad tool arguments for {tc.function.name}: {e}")
+                        result: str = "error: invalid arguments"
+                    else:
+                        result = self._dispatch(tc.function.name, args)
+                    if result == "__cannot_do__":
+                        return
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result or "done",
+                        }
+                    )
+            self.status = "idle"
+            print("[JARVIS] reached max tool iterations, stopping")
+        finally:
+            new_turns = messages[history_len + 1:]
+            self._history.extend(new_turns)
+            if len(self._history) > 20:
+                self._history = self._history[-20:]
