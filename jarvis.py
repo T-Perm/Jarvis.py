@@ -418,7 +418,7 @@ class JarvisAgent:
         match name:
             case "run_command":
                 cmd: str = args["command"].strip()
-                # intercept bare URLs/domains so they don't get run as shell commands
+                cmd = cmd.replace('\\"', '"')
                 cmd_lower = cmd.lower()
                 if cmd_lower.startswith("http://") or cmd_lower.startswith("https://") or (
                     "." in cmd and " " not in cmd and not cmd.startswith("-") and
@@ -612,7 +612,7 @@ class JarvisAgent:
                 reason: str = args.get("reason", "I don't know how to do that.")
                 print(f"[JARVIS] cannot_do: {reason}")
                 speak(reason)
-                return "acknowledged"
+                return "__cannot_do__"
 
             case _:
                 print(f"[JARVIS] unknown tool requested: {name}")
@@ -668,14 +668,16 @@ class JarvisAgent:
                 return
             self.status = "acting"
             messages.append(msg)
-            for tc in msg.tool_calls:
+            for tc in msg.tool_calls[:1]:
                 try:
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError as e:
                     print(f"[JARVIS] bad tool arguments for {tc.function.name}: {e}")
-                    result: str = f"error: invalid arguments"
+                    result: str = "error: invalid arguments"
                 else:
                     result = self._dispatch(tc.function.name, args)
+                if result == "__cannot_do__":
+                    return
                 messages.append(
                     {
                         "role": "tool",
