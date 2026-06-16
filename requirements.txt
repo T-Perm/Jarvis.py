@@ -1,0 +1,11 @@
+opencv-python
+mediapipe
+faster-whisper
+openai
+sounddevice
+numpy
+mouse
+pyautogui
+python-dotenv
+edge-tts
+pygame-ce

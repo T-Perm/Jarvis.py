@@ -10,6 +10,7 @@ Control your PC with hand gestures and summon an AI agent with your voice. No mo
 - **Whisper** transcribes what you say
 - **Llama 3.1** (via NVIDIA NIM) interprets the command and picks the right tool
 - **Jarvis speaks back** in a British male voice (`en-GB-RyanNeural`)
+- **Persistent memory** — Jarvis saves what it learns across sessions in `lessons.json`
 
 ## Gestures
 
@@ -26,53 +27,61 @@ Control your PC with hand gestures and summon an AI agent with your voice. No mo
 
 ## What Jarvis can do via voice
 
+- Open apps (Chrome, VS Code, Spotify, Discord, etc.) or any URL/domain
 - Run any PowerShell command
-- Open apps (Chrome, VS Code, Spotify, Discord, etc.) or URLs
-- Type text at the cursor
-- Press keyboard shortcuts
-- Click or drag anywhere on screen
-- Take screenshots
-- Read / write files
-- Get or set clipboard contents
+- Type text, press keyboard shortcuts
+- Click, double-click, drag, or scroll anywhere on screen
+- **Read the screen** using computer vision — finds buttons, videos, and UI elements by sight, then clicks them
+- Take screenshots, read/write files, get/set clipboard
 - Search the web
 - Speak responses aloud
+- Admit when it can't do something rather than hallucinating success
 
 ## Setup
 
 ### Requirements
 
 - Windows 10/11
-- Python 3.10+
+- Python 3.10+ (tested on 3.14)
 - A webcam
-- An NVIDIA API key (for the LLM — free tier available at build.nvidia.com)
+- An NVIDIA API key — free tier at [build.nvidia.com](https://build.nvidia.com)
 
-### Install
+### Quick start (recommended)
+
+```bash
+git clone https://github.com/T-Perm/Jarvis.py
+cd Jarvis.py
+setup.bat
+```
+
+`setup.bat` will create a venv, install dependencies, download the hand landmark model, and create a `.env` file for you. Open `.env`, paste your NVIDIA API key, then run:
+
+```bash
+venv\Scripts\activate
+python app.py
+```
+
+### Manual install
 
 ```bash
 python -m venv venv
 venv\Scripts\activate
-pip install opencv-python mediapipe faster-whisper openai sounddevice numpy mouse pyautogui python-dotenv edge-tts pygame
+pip install -r requirements.txt
 ```
 
-### Environment
+> **Note:** this project uses `pygame-ce` (Community Edition), not standard `pygame`. They conflict — do not install both.
 
-Create a `.env` file in the project root:
-
-```env
-NVIDIA_API_KEY=your_key_here
-NIM_MODEL=meta/llama-3.1-8b-instruct   # optional, this is the default
-```
-
-### Download the hand landmark model
+Download the hand landmark model:
 
 ```bash
 curl -L -o hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
 ```
 
-### Run
+Copy `.env.example` to `.env` and fill in your key:
 
-```bash
-python app.py
+```env
+NVIDIA_API_KEY=your_key_here
+NIM_MODEL=meta/llama-3.1-8b-instruct
 ```
 
 ## Architecture
@@ -91,11 +100,14 @@ hand_tracker.cc — C++ source for the GPU DLL backend (optional, faster)
 1. `sounddevice` records mic input while fist is held
 2. `faster-whisper` (`base.en`, CPU int8) transcribes the audio
 3. NVIDIA NIM (OpenAI-compatible API) runs Llama 3.1 with tool use
-4. Tools are dispatched locally (PowerShell, pyautogui, etc.)
-5. `edge-tts` synthesizes the response as `en-GB-RyanNeural` MP3, played via `pygame`
+4. Tools are dispatched locally (PowerShell, pyautogui, webbrowser, etc.)
+5. `edge-tts` synthesizes the response as `en-GB-RyanNeural` MP3, played via `pygame-ce`
+
+**Screen vision:**
+The `read_screen` tool takes a screenshot and sends it to `nvidia/llama-3.2-11b-vision-instruct` to describe what's on screen with pixel positions. Jarvis then uses `click_screen` with the coordinates it finds.
 
 ## Notes
 
-- The DLL backend requires `opencv_world3416.dll` alongside `hand_tracker.dll` in the project directory
-- `hand_landmarker.task` and `*.dll` files are gitignored — download/build them separately
-- The LLM model can be swapped via the `NIM_MODEL` env var to any model available on NVIDIA NIM
+- The DLL backend requires `opencv_world3416.dll` alongside `hand_tracker.dll`. If missing, the Python MediaPipe fallback runs automatically.
+- `hand_landmarker.task` and `*.dll` files are gitignored — `setup.bat` handles the model download automatically.
+- Swap the LLM via the `NIM_MODEL` env var to any model on NVIDIA NIM.

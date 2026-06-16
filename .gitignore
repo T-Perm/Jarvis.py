@@ -1,5 +1,9 @@
 .env
 *.dll
 *.task
+*.zip
 __pycache__/
 venv/
+lessons.json
+journal.md
+test.py
