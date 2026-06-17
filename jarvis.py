@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import queue as _q
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,32 +25,81 @@ _voice_lock: threading.Lock = threading.Lock()
 pygame.mixer.init()
 
 
-def speak(text: str, on_speaking=None, on_idle=None) -> None:
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _launch_sentence_player(sentences_q: _q.Queue, on_speaking=None, on_idle=None) -> None:
+    """Synthesize sentences from sentences_q one by one, play them in order.
+
+    Put sentence strings into sentences_q; put None to signal end.
+    Synthesis of sentence N+1 overlaps with playback of sentence N.
+    """
     def _worker() -> None:
         if on_speaking:
             on_speaking()
-        with _voice_lock:
-            async def _synth() -> str:
-                fd: int
-                path: str
+
+        audio_q: _q.Queue = _q.Queue()
+
+        async def _synth_loop() -> None:
+            loop = asyncio.get_running_loop()
+            while True:
+                sentence: str | None = await loop.run_in_executor(None, sentences_q.get)
+                if sentence is None:
+                    audio_q.put(None)
+                    return
                 fd, path = tempfile.mkstemp(suffix=".mp3")
                 os.close(fd)
-                await edge_tts.Communicate(text, JARVIS_VOICE).save(path)
-                return path
+                try:
+                    await edge_tts.Communicate(sentence, JARVIS_VOICE).save(path)
+                    audio_q.put(path)
+                except Exception as e:
+                    print(f"[TTS] synth error: {e}")
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
 
-            path: str = asyncio.run(_synth())
+        synth_t = threading.Thread(target=lambda: asyncio.run(_synth_loop()), daemon=True)
+        synth_t.start()
+
+        played: list[str] = []
+        with _voice_lock:
             try:
-                pygame.mixer.music.load(path)
-                pygame.mixer.music.play()
-                while pygame.mixer.music.get_busy():
-                    time.sleep(0.05)
+                while True:
+                    path: str | None = audio_q.get()
+                    if path is None:
+                        break
+                    played.append(path)
+                    pygame.mixer.music.load(path)
+                    pygame.mixer.music.play()
+                    while pygame.mixer.music.get_busy():
+                        time.sleep(0.05)
+                    pygame.mixer.music.unload()
             finally:
-                pygame.mixer.music.unload()
-                os.unlink(path)
+                for p in played:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
+        synth_t.join(timeout=10)
         if on_idle:
             on_idle()
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def speak_pipeline(text: str, on_speaking=None, on_idle=None) -> None:
+    sentences = _split_sentences(text)
+    if not sentences:
+        return
+    q: _q.Queue = _q.Queue()
+    for s in sentences:
+        q.put(s)
+    q.put(None)
+    _launch_sentence_player(q, on_speaking=on_speaking, on_idle=on_idle)
 
 
 _nim: OpenAI = OpenAI(
@@ -388,9 +439,9 @@ class JarvisAgent:
         self._last_command_time: float = 0.0
 
     def _speak(self, text: str) -> None:
-        speak(text,
-              on_speaking=lambda: setattr(self, 'status', 'speaking'),
-              on_idle=lambda: setattr(self, 'status', 'idle'))
+        speak_pipeline(text,
+                       on_speaking=lambda: setattr(self, "status", "speaking"),
+                       on_idle=lambda: setattr(self, "status", "idle"))
 
     @property
     def listening(self) -> bool:
@@ -658,13 +709,15 @@ class JarvisAgent:
             "RULES YOU MUST FOLLOW:\n"
             "1. For websites/URLs/domains, use open_app — NEVER run_command.\n"
             "2. run_command returns [ok] or [FAILED (exit N)] — check this before claiming success.\n"
-            "3. You have NO vision by default. When the user asks you to click something, press a button, "
+            "3. For live internet data (stock prices, weather, news, sports scores, exchange rates), "
+            "use search_web — PowerShell has no internet access and no live data cmdlets.\n"
+            "4. You have NO vision by default. When the user asks you to click something, press a button, "
             "open a specific video, or interact with anything visible on screen, you MUST call read_screen "
             "first to see where things are.\n"
-            "4. After read_screen, use click_screen with the actual pixel coordinates you observed.\n"
-            "5. If you cannot complete a task (even after trying), you MUST call cannot_do — "
+            "5. After read_screen, use click_screen with the actual pixel coordinates you observed.\n"
+            "6. If you cannot complete a task (even after trying), you MUST call cannot_do — "
             "NEVER report false success.\n"
-            "6. Use the learn tool to save what you discover across sessions.\n"
+            "7. Use the learn tool to save what you discover across sessions.\n"
             "Be concise." + lesson_block
         )
 
@@ -685,43 +738,112 @@ class JarvisAgent:
             for _ in range(max_iterations):
                 self.status = "calling jarvis"
                 try:
-                    resp = _nim.chat.completions.create(
+                    stream = _nim.chat.completions.create(
                         model=NIM_MODEL,
                         messages=messages,
                         tools=TOOLS,
                         tool_choice="auto",
                         parallel_tool_calls=False,
+                        stream=True,
                     )
                 except Exception as e:
                     print(f"[JARVIS] LLM request failed: {e}")
                     self._speak("Sorry, I couldn't reach my language model.")
                     return
-                msg = resp.choices[0].message
-                messages.append(msg)
-                if not msg.tool_calls:
-                    if msg.content:
-                        print(f"[JARVIS] {msg.content}")
-                        self._speak(msg.content)
-                    else:
+
+                full_content: str = ""
+                tool_calls_acc: dict[int, dict[str, str]] = {}
+                sentence_buf: str = ""
+                live_tts_q: _q.Queue | None = None
+
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+
+                    if delta.content:
+                        full_content += delta.content
+                        sentence_buf += delta.content
+                        while True:
+                            m = re.search(r'(?<=[.!?])\s', sentence_buf)
+                            if not m:
+                                break
+                            sentence = sentence_buf[: m.start() + 1].strip()
+                            sentence_buf = sentence_buf[m.end():]
+                            if not sentence:
+                                continue
+                            if live_tts_q is None:
+                                live_tts_q = _q.Queue()
+                                _launch_sentence_player(
+                                    live_tts_q,
+                                    on_speaking=lambda: setattr(self, "status", "speaking"),
+                                    on_idle=lambda: setattr(self, "status", "idle"),
+                                )
+                            live_tts_q.put(sentence)
+
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {"id": "", "name": "", "args": ""}
+                            if tc_delta.id:
+                                tool_calls_acc[idx]["id"] = tc_delta.id
+                            if tc_delta.function:
+                                tool_calls_acc[idx]["name"] += tc_delta.function.name or ""
+                                tool_calls_acc[idx]["args"] += tc_delta.function.arguments or ""
+
+                # Flush any remaining text not yet delimited
+                if sentence_buf.strip():
+                    if live_tts_q is None:
+                        live_tts_q = _q.Queue()
+                        _launch_sentence_player(
+                            live_tts_q,
+                            on_speaking=lambda: setattr(self, "status", "speaking"),
+                            on_idle=lambda: setattr(self, "status", "idle"),
+                        )
+                    live_tts_q.put(sentence_buf.strip())
+                if live_tts_q is not None:
+                    live_tts_q.put(None)
+
+                # Reconstruct message dict for history
+                if tool_calls_acc:
+                    tc_list = [
+                        {
+                            "id": tool_calls_acc[i]["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_calls_acc[i]["name"],
+                                "arguments": tool_calls_acc[i]["args"],
+                            },
+                        }
+                        for i in sorted(tool_calls_acc)
+                    ]
+                    msg_dict: dict[str, Any] = {"role": "assistant", "content": None, "tool_calls": tc_list}
+                else:
+                    msg_dict = {"role": "assistant", "content": full_content}
+                messages.append(msg_dict)
+
+                if not tool_calls_acc:
+                    print(f"[JARVIS] {full_content}")
+                    if full_content and live_tts_q is None:
+                        self._speak(full_content)
+                    elif not full_content:
                         self.status = "idle"
                     return
-                for tc in msg.tool_calls[:1]:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError as e:
-                        print(f"[JARVIS] bad tool arguments for {tc.function.name}: {e}")
-                        result: str = "error: invalid arguments"
-                    else:
-                        result = self._dispatch(tc.function.name, args)
-                    if result == "__cannot_do__":
-                        return
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result or "done",
-                        }
-                    )
+
+                # Dispatch the first (and only) tool call
+                tc_data = tool_calls_acc[min(tool_calls_acc)]
+                try:
+                    args = json.loads(tc_data["args"])
+                except json.JSONDecodeError as e:
+                    print(f"[JARVIS] bad tool arguments for {tc_data['name']}: {e}")
+                    result: str = "error: invalid arguments"
+                else:
+                    result = self._dispatch(tc_data["name"], args)
+                if result == "__cannot_do__":
+                    return
+                messages.append({"role": "tool", "tool_call_id": tc_data["id"], "content": result or "done"})
+
             self.status = "idle"
             print("[JARVIS] reached max tool iterations, stopping")
         finally:
