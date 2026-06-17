@@ -11,6 +11,8 @@ import time
 import webbrowser
 from typing import Any
 
+import webrtcvad
+
 import numpy as np
 import sounddevice as sd
 import edge_tts
@@ -21,6 +23,7 @@ from openai import OpenAI
 
 JARVIS_VOICE: str = "en-GB-RyanNeural"
 _voice_lock: threading.Lock = threading.Lock()
+_cancel_speaking: threading.Event = threading.Event()
 
 pygame.mixer.init()
 
@@ -66,15 +69,21 @@ def _launch_sentence_player(sentences_q: _q.Queue, on_speaking=None, on_idle=Non
 
         played: list[str] = []
         with _voice_lock:
+            _cancel_speaking.clear()
             try:
                 while True:
                     path: str | None = audio_q.get()
                     if path is None:
                         break
                     played.append(path)
+                    if _cancel_speaking.is_set():
+                        continue  # drain remaining paths without playing
                     pygame.mixer.music.load(path)
                     pygame.mixer.music.play()
                     while pygame.mixer.music.get_busy():
+                        if _cancel_speaking.is_set():
+                            pygame.mixer.music.stop()
+                            break
                         time.sleep(0.05)
                     pygame.mixer.music.unload()
             finally:
@@ -437,6 +446,9 @@ class JarvisAgent:
         self.status = "idle"
         self._history: list[dict] = []
         self._last_command_time: float = 0.0
+        self._vad: webrtcvad.Vad = webrtcvad.Vad(2)
+        self._speech_frames: int = 0
+        self._silence_frames: int = 0
 
     def _speak(self, text: str) -> None:
         speak_pipeline(text,
@@ -448,25 +460,43 @@ class JarvisAgent:
         return self._stream is not None
 
     def start_listening(self) -> None:
+        _cancel_speaking.set()  # interrupt any in-progress TTS
         self._frames = []
+        self._speech_frames = 0
+        self._silence_frames = 0
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
+            blocksize=320,  # exactly 20ms at 16kHz — required by webrtcvad
             callback=self._cb,
         )
         self._stream.start()
         self.status = "listening"
 
     def stop_and_process(self) -> None:
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        if not self._stream:
+            return  # VAD already triggered auto-stop
+        self._stream.stop()
+        self._stream.close()
+        self._stream = None
         threading.Thread(target=self._process, daemon=True).start()
 
     def _cb(self, indata: np.ndarray, frames: int, time_: Any, status: sd.CallbackFlags) -> None:
         self._frames.append(indata.copy())
+        try:
+            pcm = (indata[:, 0] * 32767).astype(np.int16).tobytes()
+            is_speech = self._vad.is_speech(pcm, SAMPLE_RATE)
+        except Exception:
+            return
+        if is_speech:
+            self._speech_frames += 1
+            self._silence_frames = 0
+        else:
+            self._silence_frames += 1
+        # Auto-stop after 300ms speech followed by 600ms silence (all counts in 20ms frames)
+        if self._speech_frames >= 15 and self._silence_frames >= 30:
+            threading.Thread(target=self.stop_and_process, daemon=True).start()
 
     def _process(self) -> None:
         self.status = "transcribing"
@@ -533,7 +563,11 @@ class JarvisAgent:
 
             case "type_text":
                 try:
-                    pyautogui.typewrite(args["text"], interval=0.03)
+                    import tkinter as tk
+                    r = tk.Tk(); r.withdraw()
+                    r.clipboard_clear(); r.clipboard_append(args["text"]); r.update()
+                    r.after(100, r.destroy); r.mainloop()
+                    pyautogui.hotkey("ctrl", "v")
                 except Exception as e:
                     return f"error: {e}"
 

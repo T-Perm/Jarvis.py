@@ -9,3 +9,4 @@ pyautogui
 python-dotenv
 edge-tts
 pygame-ce
+webrtcvad
