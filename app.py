@@ -1,10 +1,27 @@
 import ctypes
 import os
+import sys
 import time
 import math
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+
+def resource_dir() -> str:
+    """Directory holding bundled assets (DLLs, model). _MEIPASS when frozen."""
+    if getattr(sys, "frozen", False):
+        return sys._MEIPASS  # type: ignore[attr-defined]
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def app_base_dir() -> str:
+    """Directory for user files (.env, lessons.json) — next to the exe when frozen."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+# Load .env by explicit path so it works regardless of working directory / freezing.
+load_dotenv(os.path.join(app_base_dir(), ".env"), override=True)
 
 import cv2
 import numpy as np
@@ -13,8 +30,8 @@ import pyautogui
 
 from jarvis import JarvisAgent
 
-MODEL_PATH: str = "hand_landmarker.task"
-DLL_PATH: str = "hand_tracker.dll"
+MODEL_PATH: str = os.path.join(resource_dir(), "hand_landmarker.task")
+DLL_PATH: str = os.path.join(resource_dir(), "hand_tracker.dll")
 CAPTURE_W: int = 320
 CAPTURE_H: int = 240
 DISPLAY_W: int = 960
@@ -45,10 +62,13 @@ class _LM:
 
 class DLLBackend:
     def __init__(self) -> None:
-        _app_dir: str = os.path.dirname(os.path.abspath(__file__))
+        _app_dir: str = resource_dir()
         os.add_dll_directory(_app_dir)
+        # The compiled DLL opens "hand_landmarker.task" relative to the working
+        # directory, so move into the asset dir before starting the tracker.
+        os.chdir(_app_dir)
         ctypes.CDLL(os.path.join(_app_dir, "opencv_world3416.dll"))
-        self._dll = ctypes.CDLL(os.path.join(_app_dir, DLL_PATH))
+        self._dll = ctypes.CDLL(DLL_PATH)
         self._dll.ht_start.restype = ctypes.c_int
         self._dll.ht_stop.restype = None
         self._dll.ht_get_landmarks.restype = ctypes.c_int

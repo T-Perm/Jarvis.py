@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import queue as _q
 import re
 import shutil
@@ -117,10 +118,28 @@ _nim: OpenAI = OpenAI(
 )
 NIM_MODEL: str = os.environ.get("NIM_MODEL", "meta/llama-3.1-8b-instruct")
 
-_whisper: WhisperModel = WhisperModel("base.en", device="cpu", compute_type="int8")
+def _resource_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return sys._MEIPASS  # type: ignore[attr-defined]
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _app_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _whisper_source() -> str:
+    """Use a bundled CT2 model dir if present, else download 'base.en' from HF."""
+    local: str = os.path.join(_resource_dir(), "whisper-base.en")
+    return local if os.path.isdir(local) else "base.en"
+
+
+_whisper: WhisperModel = WhisperModel(_whisper_source(), device="cpu", compute_type="int8")
 SAMPLE_RATE: int = 16000
 
-LESSONS_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lessons.json")
+LESSONS_FILE: str = os.path.join(_app_base_dir(), "lessons.json")
 
 
 def _load_lessons() -> list[dict[str, str]]:

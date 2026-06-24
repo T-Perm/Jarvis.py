@@ -7,3 +7,10 @@ venv/
 lessons.json
 journal.md
 test.py
+
+# PyInstaller build artifacts
+dist/
+build_pyi/
+build_pyi*.log
+whisper_dl.log
+whisper-base.en/
