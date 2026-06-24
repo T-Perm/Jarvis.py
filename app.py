@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 def resource_dir() -> str:
     """Directory holding bundled assets (DLLs, model). _MEIPASS when frozen."""
     if getattr(sys, "frozen", False):
-        return sys._MEIPASS  # type: ignore[attr-defined]
+        return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -20,7 +20,6 @@ def app_base_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-# Load .env by explicit path so it works regardless of working directory / freezing.
 load_dotenv(os.path.join(app_base_dir(), ".env"), override=True)
 
 import cv2
@@ -64,8 +63,6 @@ class DLLBackend:
     def __init__(self) -> None:
         _app_dir: str = resource_dir()
         os.add_dll_directory(_app_dir)
-        # The compiled DLL opens "hand_landmarker.task" relative to the working
-        # directory, so move into the asset dir before starting the tracker.
         os.chdir(_app_dir)
         ctypes.CDLL(os.path.join(_app_dir, "opencv_world3416.dll"))
         self._dll = ctypes.CDLL(DLL_PATH)

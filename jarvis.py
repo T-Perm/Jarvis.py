@@ -78,7 +78,7 @@ def _launch_sentence_player(sentences_q: _q.Queue, on_speaking=None, on_idle=Non
                         break
                     played.append(path)
                     if _cancel_speaking.is_set():
-                        continue  # drain remaining paths without playing
+                        continue
                     pygame.mixer.music.load(path)
                     pygame.mixer.music.play()
                     while pygame.mixer.music.get_busy():
@@ -120,7 +120,7 @@ NIM_MODEL: str = os.environ.get("NIM_MODEL", "meta/llama-3.1-8b-instruct")
 
 def _resource_dir() -> str:
     if getattr(sys, "frozen", False):
-        return sys._MEIPASS  # type: ignore[attr-defined]
+        return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -479,7 +479,7 @@ class JarvisAgent:
         return self._stream is not None
 
     def start_listening(self) -> None:
-        _cancel_speaking.set()  # interrupt any in-progress TTS
+        _cancel_speaking.set()
         self._frames = []
         self._speech_frames = 0
         self._silence_frames = 0
@@ -487,7 +487,7 @@ class JarvisAgent:
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
-            blocksize=320,  # exactly 20ms at 16kHz — required by webrtcvad
+            blocksize=320,
             callback=self._cb,
         )
         self._stream.start()
@@ -495,7 +495,7 @@ class JarvisAgent:
 
     def stop_and_process(self) -> None:
         if not self._stream:
-            return  # VAD already triggered auto-stop
+            return
         self._stream.stop()
         self._stream.close()
         self._stream = None
@@ -513,7 +513,6 @@ class JarvisAgent:
             self._silence_frames = 0
         else:
             self._silence_frames += 1
-        # Auto-stop after 300ms speech followed by 600ms silence (all counts in 20ms frames)
         if self._speech_frames >= 15 and self._silence_frames >= 30:
             threading.Thread(target=self.stop_and_process, daemon=True).start()
 
@@ -845,7 +844,6 @@ class JarvisAgent:
                                 tool_calls_acc[idx]["name"] += tc_delta.function.name or ""
                                 tool_calls_acc[idx]["args"] += tc_delta.function.arguments or ""
 
-                # Flush any remaining text not yet delimited
                 if sentence_buf.strip():
                     if live_tts_q is None:
                         live_tts_q = _q.Queue()
@@ -858,7 +856,6 @@ class JarvisAgent:
                 if live_tts_q is not None:
                     live_tts_q.put(None)
 
-                # Reconstruct message dict for history
                 if tool_calls_acc:
                     tc_list = [
                         {
@@ -884,7 +881,6 @@ class JarvisAgent:
                         self.status = "idle"
                     return
 
-                # Dispatch the first (and only) tool call
                 tc_data = tool_calls_acc[min(tool_calls_acc)]
                 try:
                     args = json.loads(tc_data["args"])
